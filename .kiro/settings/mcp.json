@@ -1,4 +1,10 @@
 {
   "mcpServers": {
+    "docs-langchain": {
+      "url": "https://docs.langchain.com/mcp",
+      "autoApprove": [
+        "query_docs_filesystem_docs_by_lang_chain"
+      ]
+    }
   }
 }
