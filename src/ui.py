@@ -6,9 +6,11 @@ Modes:
 """
 
 import difflib
+import json
 import os
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
@@ -24,6 +26,40 @@ from src.graph.workflow import build_graph
 from src.graph.transcreator import build_transcreator_graph
 
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Visitor Tracking
+# ---------------------------------------------------------------------------
+_VISITORS_FILE = Path(__file__).resolve().parent.parent / "data" / "visitors.json"
+
+
+def _track_visitor():
+    """Track unique visitors by session. Stores visit log in data/visitors.json."""
+    if "visitor_tracked" in st.session_state:
+        return
+
+    st.session_state.visitor_tracked = True
+    _VISITORS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing data
+    if _VISITORS_FILE.exists():
+        data = json.loads(_VISITORS_FILE.read_text())
+    else:
+        data = {"total_visits": 0, "visits": []}
+
+    # Record visit
+    data["total_visits"] += 1
+    data["visits"].append({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "session_id": str(uuid.uuid4())[:8],
+    })
+
+    # Keep only last 500 entries to avoid file bloat
+    data["visits"] = data["visits"][-500:]
+    _VISITORS_FILE.write_text(json.dumps(data, indent=2))
+
+
+_track_visitor()
 
 st.set_page_config(page_title="Xpanse.ai Command Center", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
@@ -216,6 +252,12 @@ def render_sidebar():
         st.markdown("---")
         st.markdown("**Execution Log**")
         _render_timeline()
+
+        # Visitor stats
+        st.markdown("---")
+        if _VISITORS_FILE.exists():
+            vdata = json.loads(_VISITORS_FILE.read_text())
+            st.markdown(f"**Visitors:** {vdata['total_visits']} total sessions")
 
     return brief
 
