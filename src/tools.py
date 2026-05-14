@@ -28,7 +28,8 @@ def _get_tavily_client():
 
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
-        api_key = "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"
+        logger.error("TAVILY_API_KEY not set in environment")
+        return None
 
     try:
         from tavily import TavilyClient
