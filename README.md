@@ -268,4 +268,4 @@ The platform uses LangGraph's `interrupt_after` mechanism for human oversight:
 
 ## License
 
-This project is proprietary to Publicis Groupe.
+MIT
