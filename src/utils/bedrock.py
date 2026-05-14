@@ -7,11 +7,8 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 logger = logging.getLogger(__name__)
 
-# Full Inference Profile ARN — update this if you switch profiles or accounts.
-MODEL_ID = (
-    "arn:aws:bedrock:us-east-1:300923420347:"
-    "inference-profile/us.amazon.nova-lite-v1:0"
-)
+# Model ID — update this if you switch models or accounts.
+MODEL_ID = "amazon.nova-pro-v1:0"
 
 # Bedrock region must match the inference profile's home region.
 AWS_REGION = "us-east-1"
@@ -54,16 +51,9 @@ def invoke_agent(system_prompt: str, user_content: str) -> str:
                 "content": [{"text": user_content}],
             }
         ],
-        # Nova inference profile configuration
         "inferenceConfig": {
-            "maxTokens": 512,
-            "temperature": 0.7,
-            "topP": 0.9,
+            "maxTokens": 8192,
         },
-        # Required by the Nova inference profile; pass empty dict for defaults.
-        "additionalModelRequestFields": {},
-        # Request standard (vs. optimised) latency tier.
-        "performanceConfig": {"latency": "standard"},
     }
 
     try:

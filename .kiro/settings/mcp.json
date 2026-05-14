@@ -5,6 +5,22 @@
       "autoApprove": [
         "query_docs_filesystem_docs_by_lang_chain"
       ]
+    },
+    "tavily": {
+      "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=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",
+      "autoApprove": []
+    },
+    "awslabs.aws-documentation-mcp-server": {
+      "command": "uvx",
+      "args": [
+        "awslabs.aws-documentation-mcp-server@latest"
+      ],
+      "env": {
+        "FASTMCP_LOG_LEVEL": "ERROR",
+        "AWS_DOCUMENTATION_PARTITION": "aws"
+      },
+      "disabled": false,
+      "autoApprove": []
     }
   }
 }

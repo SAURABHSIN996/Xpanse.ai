@@ -1,465 +1,525 @@
-"""Xpanse Agent Command Center — Streamlit UI.
+"""Xpanse.ai — Dual-Mode Agent Command Center.
 
-Progressive dashboard that mirrors the LangGraph workflow lifecycle:
-
-  Stage 0  →  Idle (sidebar config, launch button)
-  Stage 1  →  Analysis running (compliance + strategy in parallel)
-  Stage 2  →  Awaiting Review (HITL gate — yellow review panel)
-  Stage 3  →  Completed (technical artifacts in tabbed code explorer)
-
-Session state keys
-------------------
-  thread_id      : str   — UUID for the current LangGraph thread
-  graph_app      : obj   — compiled LangGraph instance (with MemorySaver)
-  checkpointer   : obj   — shared MemorySaver instance
-  current_stage  : str   — 'idle' | 'analysis' | 'awaiting_review' | 'completed'
-  compliance_output : str | None
-  strategy_output   : str | None
-  technical_artifacts : dict | None
+Modes:
+  1. Campaign Strategy — 3-agent pipeline with feedback router
+  2. Content Transcreation — Cultural research + draft + critic reflection loop
 """
 
+import difflib
+import os
+import sys
 import uuid
+from pathlib import Path
+
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 import streamlit as st
+from dotenv import load_dotenv
 from langgraph.checkpoint.memory import MemorySaver
 
-from src.graph.state import create_initial_state
+from src.graph.state import create_initial_state, create_transcreator_state
 from src.graph.workflow import build_graph
+from src.graph.transcreator import build_transcreator_graph
+
+load_dotenv()
+
+st.set_page_config(page_title="Xpanse.ai Command Center", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
 # ---------------------------------------------------------------------------
-# Page config — must be the very first Streamlit call
+# CSS
 # ---------------------------------------------------------------------------
-
-st.set_page_config(
-    page_title="Xpanse Agent Command Center",
-    page_icon="🌐",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# ---------------------------------------------------------------------------
-# Custom CSS — Enterprise Dark Mode aesthetic
-# ---------------------------------------------------------------------------
-
-st.markdown(
-    """
-    <style>
-    /* ── Global dark background ── */
-    .stApp { background-color: #0d1117; color: #e6edf3; }
-
-    /* ── Sidebar ── */
-    [data-testid="stSidebar"] {
-        background-color: #161b22;
-        border-right: 1px solid #30363d;
-    }
-    [data-testid="stSidebar"] * { color: #e6edf3 !important; }
-
-    /* ── Stage cards ── */
-    .card {
-        background: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 10px;
-        padding: 1.2rem 1.4rem;
-        margin-bottom: 1rem;
-    }
-    .card-compliance { border-left: 4px solid #58a6ff; }
-    .card-strategy   { border-left: 4px solid #3fb950; }
-
-    /* ── HITL review panel ── */
-    .review-panel {
-        background: #1c1a00;
-        border: 2px solid #e3b341;
-        border-radius: 10px;
-        padding: 1.4rem;
-        margin-bottom: 1rem;
-    }
-    .review-panel h3 { color: #e3b341 !important; }
-
-    /* ── Stage 3 artifact panel ── */
-    .artifact-panel {
-        background: #0d1117;
-        border: 1px solid #30363d;
-        border-radius: 10px;
-        padding: 1rem;
-    }
-
-    /* ── LED status indicator ── */
-    .led-active  { color: #3fb950; font-weight: 600; }
-    .led-error   { color: #f85149; font-weight: 600; }
-
-    /* ── Stage header labels ── */
-    .stage-label {
-        font-size: 0.72rem;
-        font-weight: 700;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        color: #8b949e;
-        margin-bottom: 0.3rem;
-    }
-
-    /* ── Divider ── */
-    hr { border-color: #30363d; }
-
-    /* ── Button overrides ── */
-    .stButton > button {
-        background: #238636;
-        color: #ffffff;
-        border: none;
-        border-radius: 6px;
-        font-weight: 600;
-    }
-    .stButton > button:hover { background: #2ea043; }
-
-    /* ── Refine button ── */
-    .btn-refine > button {
-        background: #9e6a03 !important;
-    }
-    .btn-refine > button:hover { background: #bb8009 !important; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("""
+<style>
+.stApp { background-color: #0f1419; color: #c9d1d9; font-size: 13px; }
+[data-testid="stSidebar"] { background-color: #161b22; border-right: 1px solid #21262d; min-width: 340px !important; width: 340px !important; }
+[data-testid="stSidebar"] p, [data-testid="stSidebar"] label, [data-testid="stSidebar"] span:not(.led-on):not(.led-off) { color: #c9d1d9; font-size: 12px; }
+section[data-testid="stSidebar"] > div { width: 340px; }
+h1 { font-size: 1.15rem !important; font-weight: 600 !important; color: #f0f6fc !important; }
+h2 { font-size: 0.95rem !important; font-weight: 600 !important; color: #e6edf3 !important; }
+h3 { font-size: 0.82rem !important; font-weight: 600 !important; }
+p, li, span { font-size: 12px; }
+.led { display: inline-flex; align-items: center; gap: 4px; font-size: 0.7rem !important; margin-bottom: 2px; }
+.led-on, .led-on * { color: #3fb950 !important; }
+.led-off, .led-off * { color: #f85149 !important; }
+.flow-graph { display:flex; align-items:center; justify-content:center; gap:0; padding:14px 10px; background:#161b22; border:1px solid #21262d; border-radius:8px; margin-bottom:1rem; }
+.flow-node { width:42px; height:42px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:15px; border:2px solid #30363d; background:#0f1419; }
+.flow-node-done { border-color:#3fb950; background:#0d3320; }
+.flow-node-active { border-color:#58a6ff; background:#0c2d6b; animation:pulse 1.5s infinite; }
+.flow-node-pending { border-color:#30363d; opacity:0.4; }
+.flow-node-loopback { border-color:#d29922; background:#1c1a00; }
+.flow-edge { width:28px; height:2px; background:#30363d; }
+.flow-edge-done { background:#3fb950; }
+.flow-label { font-size:0.58rem; color:#8b949e; text-align:center; margin-top:3px; font-weight:500; }
+.flow-label-done { color:#3fb950; }
+@keyframes pulse { 0%,100%{box-shadow:0 0 0 0 rgba(88,166,255,0.4)} 50%{box-shadow:0 0 0 7px rgba(88,166,255,0)} }
+.agent-card { background:#161b22; border:1px solid #21262d; border-radius:6px; padding:0.7rem 0.9rem; margin-bottom:0.5rem; font-size:12px; }
+.card-done { border-left:3px solid #3fb950; }
+.card-pending { border-left:3px solid #30363d; opacity:0.5; }
+.impact-card { background:#1a1814; border:1px solid #d29922; border-radius:6px; padding:0.6rem 0.8rem; margin:0.4rem 0; font-size:12px; }
+.diff-add { background:#0d3320; color:#7ee787; padding:1px 4px; font-family:monospace; font-size:11px; }
+.diff-del { background:#3d1117; color:#ffa198; padding:1px 4px; font-family:monospace; font-size:11px; text-decoration:line-through; }
+.score-bar { height:6px; border-radius:3px; background:#21262d; overflow:hidden; margin:4px 0; }
+.score-fill { height:100%; border-radius:3px; transition:width 0.3s; }
+.stButton > button { font-size:0.75rem !important; font-weight:500; border-radius:5px; padding:0.4rem 0.8rem; background:#1f6feb !important; color:#fff !important; border:none !important; }
+.stButton > button:hover { background:#388bfd !important; }
+[data-testid="stSidebar"] .stButton > button { background:#238636 !important; }
+[data-testid="stSidebar"] .stButton > button:hover { background:#2ea043 !important; }
+.tl-entry { display:flex; align-items:flex-start; gap:6px; margin-bottom:3px; font-size:0.65rem; font-family:monospace; }
+.tl-dot { width:7px; height:7px; border-radius:50%; margin-top:3px; flex-shrink:0; }
+.tl-green { background:#3fb950; } .tl-blue { background:#58a6ff; } .tl-amber { background:#d29922; }
+</style>
+""", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Session state initialisation
+# Session state
 # ---------------------------------------------------------------------------
-
-DEFAULTS: dict = {
-    "thread_id": None,
-    "graph_app": None,
-    "checkpointer": None,
-    "current_stage": "idle",
-    "compliance_output": None,
-    "strategy_output": None,
-    "technical_artifacts": None,
-}
-
-for key, val in DEFAULTS.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
-
+DEFAULTS = {"thread_id": None, "campaign_app": None, "transcreator_app": None, "checkpointer": None, "stage": "idle", "pipeline_state": None, "app_mode": "Campaign Strategy"}
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 # ---------------------------------------------------------------------------
-# Helper: initialise (or reuse) the compiled graph
+# Graph helpers
 # ---------------------------------------------------------------------------
+def _get_campaign_app():
+    if st.session_state.campaign_app is None:
+        cp = MemorySaver()
+        st.session_state.checkpointer = cp
+        st.session_state.campaign_app = build_graph(checkpointer=cp)
+    return st.session_state.campaign_app
 
-def _get_app():
-    """Return the compiled LangGraph app, creating it once per session."""
-    if st.session_state.graph_app is None:
-        checkpointer = MemorySaver()
-        st.session_state.checkpointer = checkpointer
-        st.session_state.graph_app = build_graph(checkpointer=checkpointer)
-    return st.session_state.graph_app
+def _get_transcreator_app():
+    if st.session_state.transcreator_app is None:
+        cp = MemorySaver()
+        st.session_state.transcreator_app = build_transcreator_graph(checkpointer=cp)
+    return st.session_state.transcreator_app
 
-
-def _thread_config() -> dict:
+def _cfg():
     return {"configurable": {"thread_id": st.session_state.thread_id}}
 
-
-# ---------------------------------------------------------------------------
-# Helper: stream Stage 1 and collect outputs
-# ---------------------------------------------------------------------------
-
-def _run_stage1(region: str, goal: str) -> None:
-    """Stream Stage 1 nodes and update session state as each node completes."""
-    app = _get_app()
+# Campaign mode helpers
+def _run_campaign(brief):
+    app = _get_campaign_app()
     st.session_state.thread_id = str(uuid.uuid4())
-    st.session_state.current_stage = "analysis"
-    st.session_state.compliance_output = None
-    st.session_state.strategy_output = None
-    st.session_state.technical_artifacts = None
+    st.session_state.stage = "running"
+    st.session_state.pipeline_state = None
+    config = _cfg()
+    for _ in app.stream(create_initial_state(**brief), config=config, stream_mode="values"):
+        pass
+    snap = app.get_state(config)
+    if snap and snap.values:
+        st.session_state.pipeline_state = snap.values
+    st.session_state.stage = "review"
 
-    initial_state = create_initial_state(
-        target_region=region,
-        campaign_goal=goal,
-    )
+def _resume_campaign_feedback(feedback):
+    app = _get_campaign_app()
+    config = _cfg()
+    app.update_state(config, {"human_feedback": feedback, "is_approved": False}, as_node="campaign_architect")
+    for _ in app.stream(None, config=config, stream_mode="values"):
+        pass
+    snap = app.get_state(config)
+    if snap and snap.values:
+        st.session_state.pipeline_state = snap.values
+    st.session_state.stage = "review"
 
-    config = _thread_config()
+def _approve_campaign():
+    app = _get_campaign_app()
+    config = _cfg()
+    app.update_state(config, {"human_feedback": "approve", "is_approved": True, "target_node": "end"}, as_node="campaign_architect")
+    for _ in app.stream(None, config=config, stream_mode="values"):
+        pass
+    snap = app.get_state(config)
+    if snap and snap.values:
+        st.session_state.pipeline_state = snap.values
+    st.session_state.stage = "approved"
 
-    # Stream node-by-node; update session state as outputs arrive
-    for snapshot in app.stream(initial_state, config=config, stream_mode="values"):
-        if snapshot.get("compliance_output"):
-            st.session_state.compliance_output = snapshot["compliance_output"]
-        if snapshot.get("strategy_output"):
-            st.session_state.strategy_output = snapshot["strategy_output"]
+# Transcreator mode helpers
+def _run_transcreator(source_content, target_market, brand_tone=""):
+    app = _get_transcreator_app()
+    st.session_state.thread_id = str(uuid.uuid4())
+    st.session_state.stage = "running"
+    st.session_state.pipeline_state = None
+    config = _cfg()
+    initial = create_transcreator_state(source_content=source_content, target_market=target_market, brand_tone=brand_tone)
+    for _ in app.stream(initial, config=config, stream_mode="values"):
+        pass
+    snap = app.get_state(config)
+    if snap and snap.values:
+        st.session_state.pipeline_state = snap.values
+    st.session_state.stage = "review"
 
-    # Graph has paused at interrupt_before=["architect"]
-    st.session_state.current_stage = "awaiting_review"
-
-
-# ---------------------------------------------------------------------------
-# Helper: resume after human decision
-# ---------------------------------------------------------------------------
-
-def _resume(approved: bool, feedback: str | None = None) -> None:
-    """Inject human decision and resume the graph from the interrupt point."""
-    app = _get_app()
-    config = _thread_config()
-
-    state_update: dict = {"is_approved": approved}
-    if feedback:
-        state_update["human_feedback"] = feedback
-
-    app.update_state(config, state_update)
-
-    for snapshot in app.stream(None, config=config, stream_mode="values"):
-        artifacts = snapshot.get("technical_artifacts")
-        if artifacts:
-            st.session_state.technical_artifacts = artifacts
-
-    if approved:
-        st.session_state.current_stage = "completed"
-    else:
-        # Strategy loop — go back to awaiting_review after re-run
-        st.session_state.current_stage = "awaiting_review"
-
+def _approve_transcreator():
+    app = _get_transcreator_app()
+    config = _cfg()
+    app.update_state(config, {"is_approved": True}, as_node="cultural_critic")
+    for _ in app.stream(None, config=config, stream_mode="values"):
+        pass
+    snap = app.get_state(config)
+    if snap and snap.values:
+        st.session_state.pipeline_state = snap.values
+    st.session_state.stage = "approved"
 
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
-
-def render_sidebar() -> tuple[str, str]:
-    """Render the control panel sidebar. Returns (region, goal)."""
+def render_sidebar():
     with st.sidebar:
-        st.markdown("## 🌐 Xpanse Command Center")
-        st.markdown("---")
+        st.markdown("## ⚡ Xpanse.ai Command Center")
 
-        # Bedrock connection status
-        st.markdown("**System Status**")
-        st.markdown(
-            '<span class="led-active">⬤ Bedrock Connection: Active</span>',
-            unsafe_allow_html=True,
-        )
-        st.markdown("---")
-
-        st.markdown("**Campaign Configuration**")
-
-        region = st.selectbox(
-            "Target Region",
-            options=["Japan", "Germany", "United Kingdom", "India", "Brazil", "South Korea"],
-            index=0,
-            help="The geographic market for this expansion campaign.",
-        )
-
-        goal = st.text_area(
-            "Expansion Goal",
-            placeholder="e.g. Expand Sneaker Rewards Program to drive Gen-Z engagement...",
-            height=120,
-            help="Describe the specific business objective for this campaign.",
-        )
-
-        st.markdown("---")
-
-        launch_disabled = st.session_state.current_stage not in ("idle", "completed")
-        launch = st.button(
-            "🚀 Launch Expansion Squad",
-            disabled=launch_disabled,
-            use_container_width=True,
-        )
-
-        if st.session_state.current_stage not in ("idle", "completed"):
-            st.caption("Pipeline is running — wait for completion to relaunch.")
-
-        if st.session_state.thread_id:
-            st.markdown("---")
-            st.markdown("**Session**")
-            st.caption(f"Thread: `{st.session_state.thread_id[:8]}…`")
-            st.caption(f"Stage: `{st.session_state.current_stage}`")
-
-    return region, goal, launch
-
-
-# ---------------------------------------------------------------------------
-# Stage 1: Analysis cards
-# ---------------------------------------------------------------------------
-
-def render_stage1() -> None:
-    """Render the parallel compliance + strategy output cards."""
-    st.markdown('<p class="stage-label">Stage 1 — Analysis & Strategy</p>', unsafe_allow_html=True)
-
-    col_compliance, col_strategy = st.columns(2, gap="medium")
-
-    with col_compliance:
-        st.markdown('<div class="card card-compliance">', unsafe_allow_html=True)
-        st.markdown("### 🛡️ Compliance Sentinel")
-        if st.session_state.current_stage == "analysis" and not st.session_state.compliance_output:
-            with st.spinner("Analysing legal & data residency risks…"):
-                st.empty()
-        elif st.session_state.compliance_output:
-            # Render each line as a checklist item where possible
-            lines = st.session_state.compliance_output.strip().splitlines()
-            for line in lines:
-                stripped = line.strip()
-                if stripped:
-                    if stripped[0].isdigit() and stripped[1:3] in (". ", ") "):
-                        st.markdown(f"✅ {stripped}")
-                    else:
-                        st.markdown(stripped)
-        else:
-            st.caption("Awaiting launch…")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with col_strategy:
-        st.markdown('<div class="card card-strategy">', unsafe_allow_html=True)
-        st.markdown("### 🎯 Cultural Strategist")
-        if st.session_state.current_stage == "analysis" and not st.session_state.strategy_output:
-            with st.spinner("Crafting localised strategy…"):
-                st.empty()
-        elif st.session_state.strategy_output:
-            st.markdown(st.session_state.strategy_output)
-        else:
-            st.caption("Awaiting launch…")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-
-# ---------------------------------------------------------------------------
-# Stage 2: HITL Review Panel
-# ---------------------------------------------------------------------------
-
-def render_stage2() -> None:
-    """Render the human-in-the-loop approval gate."""
-    st.markdown("---")
-    st.markdown('<p class="stage-label">Stage 2 — Human Review Gate</p>', unsafe_allow_html=True)
-
-    st.markdown('<div class="review-panel">', unsafe_allow_html=True)
-    st.markdown("### ⚠️ Awaiting Your Approval")
-    st.markdown(
-        "Review the **Compliance Report** and **Localised Strategy** above. "
-        "You can approve the plan to generate technical artifacts, or send it "
-        "back to the Strategist with refinement instructions."
-    )
-
-    feedback = st.text_area(
-        "Refinement Instructions (optional)",
-        placeholder="e.g. Increase point multiplier for limited-edition drops, focus on LINE messaging channel…",
-        height=90,
-        key="hitl_feedback",
-    )
-
-    col_refine, col_approve = st.columns([1, 1], gap="small")
-
-    with col_refine:
-        st.markdown('<div class="btn-refine">', unsafe_allow_html=True)
-        if st.button("🔄 Refine Plan", use_container_width=True):
-            if not feedback.strip():
-                st.warning("Please provide refinement instructions before sending back.")
-            else:
-                with st.spinner("Sending feedback to Strategist…"):
-                    _resume(approved=False, feedback=feedback.strip())
-                st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with col_approve:
-        if st.button("✅ Approve & Generate Code", use_container_width=True):
-            with st.spinner("Generating technical artifacts — this may take a moment…"):
-                _resume(approved=True)
+        # Mode selector
+        mode = st.radio("Mode", ["Campaign Strategy", "Content Transcreation"], key="mode_radio", horizontal=True)
+        if mode != st.session_state.app_mode:
+            st.session_state.app_mode = mode
+            st.session_state.stage = "idle"
+            st.session_state.pipeline_state = None
+            st.session_state.thread_id = None
             st.rerun()
 
-    st.markdown("</div>", unsafe_allow_html=True)
+        # Mode description
+        if mode == "Campaign Strategy":
+            st.caption(
+                "🏗️ **3-Agent Pipeline** — Analyzes past campaign archives, "
+                "researches live market trends, then synthesizes a full campaign "
+                "strategy. You review and refine with feedback until approved."
+            )
+        else:
+            st.caption(
+                "🌐 **Content Transcreation** — Researches local culture for your "
+                "target market, adapts your English copy to resonate locally, then "
+                "a critic scores it. Auto-loops until quality passes, then you approve."
+            )
 
+        st.markdown("---")
 
-# ---------------------------------------------------------------------------
-# Stage 3: Technical Artifacts
-# ---------------------------------------------------------------------------
+        # System Health
+        st.markdown("**System**")
+        c1, c2 = st.columns(2)
+        with c1:
+            _led("Archive KnowledgeBase", bool(os.getenv("ARCHIVE_KB_ID")))
+            _led("Brand KnowledgeBase", bool(os.getenv("BRAND_KB_ID")))
+        with c2:
+            _led("Web Search Tool", bool(os.getenv("TAVILY_API_KEY")))
+            _led("Bedrock Model", bool(os.getenv("AWS_REGION") or True))
 
-def render_stage3() -> None:
-    """Render the tabbed code explorer with SQL, Python, and QA report."""
+        st.markdown("---")
+
+        # Mode-specific inputs
+        brief = None
+        if st.session_state.app_mode == "Campaign Strategy":
+            brief = _campaign_inputs()
+        else:
+            brief = _transcreator_inputs()
+
+        # Execution log
+        st.markdown("---")
+        st.markdown("**Execution Log**")
+        _render_timeline()
+
+    return brief
+
+def _campaign_inputs():
+    st.markdown("**Campaign Brief**")
+    aim = st.text_area("Objective", placeholder="Campaign goal, audience, budget...", height=100, key="in_aim")
+    cons = st.text_input("Constraints", placeholder="Guardrails", key="in_cons")
+    exp = st.checkbox("Geographic Expansion", key="in_exp")
+    reg = st.text_input("Region", placeholder="e.g., Japan", key="in_reg") if exp else None
     st.markdown("---")
-    st.markdown('<p class="stage-label">Stage 3 — Technical Artifacts</p>', unsafe_allow_html=True)
+    can = st.session_state.stage in ("idle", "approved")
+    if st.button("▶ Launch Strategy Engine", disabled=not can, use_container_width=True, type="primary", key="btn_campaign"):
+        if aim.strip():
+            return ("campaign", {"campaign_aim": aim.strip(), "target_audience": "", "budget": 0.0, "duration": "", "constraints": cons.strip(), "is_expansion": exp, "target_region": reg.strip() if reg else None})
+        st.error("Enter objective.")
+    return None
 
-    artifacts = st.session_state.technical_artifacts or {}
-    sql_code = artifacts.get("sql", "")
-    python_code = artifacts.get("python", "")
-    qa_report = artifacts.get("qa_report", "")
+def _transcreator_inputs():
+    st.markdown("**Content Transcreation**")
+    content = st.text_area("Source Content (English)", placeholder="Paste your marketing copy here...", height=120, key="in_content")
+    market = st.selectbox("Target Market", ["Japan", "Germany", "France", "Brazil", "India", "South Korea", "Italy", "Mexico", "UAE"], key="in_market")
+    tone = st.text_input("Brand Tone (optional)", placeholder="e.g., playful, premium, minimalist", key="in_tone")
+    st.markdown("---")
+    can = st.session_state.stage in ("idle", "approved")
+    if st.button("▶ Launch Transcreator", disabled=not can, use_container_width=True, type="primary", key="btn_trans"):
+        if content.strip():
+            return ("transcreator", {"source_content": content.strip(), "target_market": market, "brand_tone": tone.strip()})
+        st.error("Paste source content.")
+    return None
 
-    if not any([sql_code, python_code, qa_report]):
-        st.info("Technical artifacts will appear here after approval.")
+def _led(label, ok):
+    cls = "led-on" if ok else "led-off"
+    st.markdown(f'<span class="led {cls}">{"●" if ok else "○"} {label}</span>', unsafe_allow_html=True)
+
+def _render_timeline():
+    state = st.session_state.pipeline_state or {}
+    log = state.get("execution_log", [])
+    if not log:
+        st.caption("No activity yet.")
         return
-
-    tab_sql, tab_python, tab_qa = st.tabs(["🗄️ Snowflake SQL", "🐍 AWS Lambda Python", "🔍 QA Report"])
-
-    with tab_sql:
-        if sql_code:
-            st.code(sql_code, language="sql")
-        else:
-            st.caption("No SQL artifact generated.")
-
-    with tab_python:
-        if python_code:
-            st.code(python_code, language="python")
-        else:
-            st.caption("No Python artifact generated.")
-
-    with tab_qa:
-        if qa_report:
-            st.markdown(qa_report)
-        else:
-            st.caption("No QA report generated.")
-
+    names = {"sentinel": "Historian", "seer": "Market Intel", "architect": "Architect", "router": "Router", "researcher": "Researcher", "drafter": "Drafter", "critic": "Critic"}
+    html = ""
+    for e in log[-12:]:
+        agent = names.get(e.get("agent", ""), e.get("agent", ""))
+        ts = e.get("timestamp", "")
+        status = e.get("status", "")
+        dot = "tl-green" if "complete" in status else "tl-blue"
+        html += f'<div class="tl-entry"><span class="tl-dot {dot}"></span><span>{ts} {agent} [{status}]</span></div>'
+    st.markdown(html, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Main render loop
+# Campaign Mode UI (existing)
 # ---------------------------------------------------------------------------
+def render_campaign_flow(state):
+    active = state.get("active_node", "")
+    has_s = bool(state.get("historical_dna"))
+    has_r = bool(state.get("market_pulse"))
+    has_a = bool(state.get("strategy_document"))
+    target = state.get("target_node", "")
+    def ncls(n, d):
+        if active == n: return "flow-node-active"
+        return "flow-node-done" if d else "flow-node-pending"
+    def ecls(l, r): return "flow-edge-done" if l and r else ""
+    def lcls(d): return "flow-label-done" if d else ""
+    html = f'''<div class="flow-graph">
+    <div style="text-align:center"><div class="flow-node {ncls("sentinel",has_s)}">📚</div><div class="flow-label {lcls(has_s)}">Historian</div></div>
+    <div class="flow-edge {ecls(has_s,has_r)}"></div>
+    <div style="text-align:center"><div class="flow-node {ncls("seer",has_r)}">🌐</div><div class="flow-label {lcls(has_r)}">Market Intel</div></div>
+    <div class="flow-edge {ecls(has_r,has_a)}"></div>
+    <div style="text-align:center"><div class="flow-node {ncls("architect",has_a)}">🏗️</div><div class="flow-label {lcls(has_a)}">Architect</div></div>
+    <div class="flow-edge {ecls(has_a,bool(target))}"></div>
+    <div style="text-align:center"><div class="flow-node {"flow-node-done" if target=="end" else ("flow-node-loopback" if target else "flow-node-pending")}">↻</div><div class="flow-label">Router</div></div>
+    </div>'''
+    st.markdown(html, unsafe_allow_html=True)
 
-def main() -> None:
-    region, goal, launch = render_sidebar()
-
-    # ── Page header ──────────────────────────────────────────────────────────
-    st.markdown("# 🌐 Global Loyalty Expansion")
-    st.markdown(
-        "An AI-powered multi-agent system that analyses compliance risks, "
-        "crafts localised strategies, and generates production-ready code — "
-        "with a human-in-the-loop approval gate."
-    )
-    st.markdown("---")
-
-    # ── Launch handler ────────────────────────────────────────────────────────
-    if launch:
-        if not goal.strip():
-            st.sidebar.error("Please enter an Expansion Goal before launching.")
+def render_campaign_review(state):
+    render_campaign_flow(state)
+    reasoning = state.get("router_reasoning", "")
+    if reasoning and state.get("loop_count", 0) > 1:
+        st.markdown(f'<div class="impact-card">🧠 {reasoning}</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        done = bool(state.get("historical_dna"))
+        st.markdown(f'<div class="agent-card {"card-done" if done else "card-pending"}"><b>📚 Campaign Historian</b></div>', unsafe_allow_html=True)
+        if done:
+            with st.expander("Past Campaign Analysis"):
+                st.markdown(state.get("historical_dna", ""))
+            recs = state.get("sentinel_recommendations", "")
+            if recs:
+                with st.expander("→ Recommendations to Market Intel & Architect"):
+                    st.markdown(recs)
+    with c2:
+        done = bool(state.get("market_pulse"))
+        queries = state.get("tavily_queries", [])
+        st.markdown(f'<div class="agent-card {"card-done" if done else "card-pending"}"><b>🌐 Market Intelligence</b></div>', unsafe_allow_html=True)
+        if queries:
+            with st.expander("🔍 Web Search Activity"):
+                for q in queries:
+                    st.markdown(f"✓ `{q}`")
+        if done:
+            with st.expander("Search Intelligence Report"):
+                st.markdown(state.get("market_pulse", ""))
+            recs = state.get("seer_recommendations", "")
+            if recs:
+                with st.expander("→ Recommendations to Architect"):
+                    st.markdown(recs)
+    strategy = state.get("strategy_document", "")
+    if strategy:
+        st.markdown('<div class="agent-card card-done"><b>🏗️ Campaign Architect</b></div>', unsafe_allow_html=True)
+        prev = state.get("previous_strategy", "")
+        if prev and prev != strategy:
+            t1, t2 = st.tabs(["Strategy", "Changes"])
+            with t1: st.markdown(strategy)
+            with t2: _render_diff(prev, strategy)
         else:
-            with st.spinner("🚀 Launching Expansion Squad — running compliance & strategy agents in parallel…"):
-                try:
-                    _run_stage1(region=region, goal=goal.strip())
-                except RuntimeError as exc:
-                    st.error(f"**Pipeline error:** {exc}")
-                    st.session_state.current_stage = "idle"
-            st.rerun()
+            with st.expander("View Strategy", expanded=True):
+                st.markdown(strategy)
+    # Approval gate
+    with st.container(border=True):
+        st.markdown("**⚠ Approval Gate**")
+        st.caption("past/history → Historian · market/trends → Market Intel · strategy/tone → Architect")
+        fb = st.text_area("Feedback", placeholder="What should change?", height=60, key="fb_camp", label_visibility="collapsed")
+        ca, cf = st.columns(2)
+        with ca:
+            if st.button("✓ Approve", use_container_width=True, key="btn_camp_ok"):
+                with st.spinner("Finalizing..."): _approve_campaign()
+                st.rerun()
+        with cf:
+            if st.button("↻ Refine", use_container_width=True, key="btn_camp_fb"):
+                if not fb.strip(): st.warning("Provide feedback.")
+                else:
+                    with st.spinner("Re-processing..."): _resume_campaign_feedback(fb.strip())
+                    st.rerun()
+        history = state.get("feedback_history", [])
+        if history:
+            with st.expander(f"Log ({len(history)})"):
+                for i, f in enumerate(history, 1): st.markdown(f"`[{i}]` {f}")
 
-    # ── Progressive rendering based on current stage ──────────────────────────
-    stage = st.session_state.current_stage
+# ---------------------------------------------------------------------------
+# Transcreator Mode UI (new)
+# ---------------------------------------------------------------------------
+def render_transcreator_flow(state):
+    has_r = bool(state.get("cultural_research"))
+    has_d = bool(state.get("draft_content"))
+    has_c = state.get("critic_score", 0) > 0
+    loops = state.get("reflection_loops", 0)
+    active = state.get("active_node", "")
+    def ncls(n, d):
+        if active == n: return "flow-node-active"
+        return "flow-node-done" if d else "flow-node-pending"
+    def ecls(l, r): return "flow-edge-done" if l and r else ""
+    def lcls(d): return "flow-label-done" if d else ""
+    html = f'''<div class="flow-graph">
+    <div style="text-align:center"><div class="flow-node {ncls("researcher",has_r)}">🔬</div><div class="flow-label {lcls(has_r)}">Researcher</div></div>
+    <div class="flow-edge {ecls(has_r,has_d)}"></div>
+    <div style="text-align:center"><div class="flow-node {ncls("drafter",has_d)}">✍️</div><div class="flow-label {lcls(has_d)}">Drafter</div></div>
+    <div class="flow-edge {ecls(has_d,has_c)}"></div>
+    <div style="text-align:center"><div class="flow-node {ncls("critic",has_c)}">🎭</div><div class="flow-label {lcls(has_c)}">Critic</div></div>
+    </div>'''
+    if loops > 1:
+        html += f'<div style="text-align:center;font-size:0.62rem;color:#d29922;">⤺ {loops} reflection loops completed</div>'
+    st.markdown(html, unsafe_allow_html=True)
 
-    if stage == "idle":
-        st.markdown(
-            '<div class="card" style="text-align:center; padding: 3rem;">'
-            "<h3>Ready to Launch</h3>"
-            "<p>Configure your campaign in the sidebar and click "
-            "<strong>Launch Expansion Squad</strong> to begin.</p>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
+def render_transcreator_review(state):
+    render_transcreator_flow(state)
 
-    elif stage == "analysis":
-        render_stage1()
-        st.info("⏳ Agents are running — the page will update automatically when Stage 1 completes.")
+    # Critic score bar
+    score = state.get("critic_score", 0)
+    loops = state.get("reflection_loops", 0)
+    color = "#3fb950" if score >= 7 else ("#d29922" if score >= 5 else "#f85149")
+    st.markdown(f'<div style="font-size:11px;margin-bottom:2px;">Critic Score: <b>{score}/10</b> · Loops: {loops}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="score-bar"><div class="score-fill" style="width:{score*10}%;background:{color};"></div></div>', unsafe_allow_html=True)
 
-    elif stage in ("awaiting_review", "completed"):
-        # Always show Stage 1 outputs once available
-        render_stage1()
+    # Cultural Research
+    c1, c2 = st.columns(2)
+    with c1:
+        done = bool(state.get("cultural_research"))
+        st.markdown(f'<div class="agent-card {"card-done" if done else "card-pending"}"><b>🔬 Cultural Researcher</b></div>', unsafe_allow_html=True)
+        if done:
+            with st.expander("Cultural Intelligence Brief"):
+                st.markdown(state.get("cultural_research", ""))
+            queries = state.get("research_queries", [])
+            if queries:
+                with st.expander("🔍 Research Queries"):
+                    for q in queries: st.markdown(f"✓ `{q}`")
 
-        if stage == "awaiting_review":
-            render_stage2()
+    with c2:
+        done = bool(state.get("draft_content"))
+        st.markdown(f'<div class="agent-card {"card-done" if done else "card-pending"}"><b>✍️ Content Drafter</b></div>', unsafe_allow_html=True)
+        if done:
+            with st.expander("Localized Content (Latest Draft)"):
+                st.markdown(state.get("draft_content", ""))
 
-        if stage == "completed" or st.session_state.technical_artifacts:
-            render_stage3()
+    # Critic feedback (if any)
+    critic_fb = state.get("critic_feedback", "")
+    if critic_fb:
+        with st.expander("🎭 Critic Feedback (addressed in latest draft)"):
+            st.markdown(critic_fb)
 
-        if stage == "completed":
-            st.success("✅ Pipeline complete! All artifacts have been generated and validated.")
-            if st.button("🔁 Start New Expansion", use_container_width=False):
-                for key in DEFAULTS:
-                    st.session_state[key] = DEFAULTS[key]
+    # Draft versions
+    versions = state.get("draft_versions", [])
+    if len(versions) > 1:
+        with st.expander(f"📜 Draft History ({len(versions)} versions)"):
+            for v in versions:
+                st.markdown(f"**v{v.get('version')}** — critic: _{v.get('critic_feedback', 'initial')[:80]}…_")
+
+    # Approval gate
+    with st.container(border=True):
+        st.markdown("**✓ Human Review**")
+        st.caption(f"The critic scored this {score}/10. Review the localized content and approve or request changes.")
+        ca, _ = st.columns([1, 1])
+        with ca:
+            if st.button("✓ Approve Content", use_container_width=True, key="btn_trans_ok"):
+                with st.spinner("Finalizing..."): _approve_transcreator()
                 st.rerun()
 
+def render_approved(state):
+    if st.session_state.app_mode == "Campaign Strategy":
+        render_campaign_flow(state)
+        st.success("Strategy approved.")
+        with st.expander("Final Strategy", expanded=True):
+            st.markdown(state.get("strategy_document", ""))
+    else:
+        render_transcreator_flow(state)
+        st.success("Transcreated content approved.")
+        with st.expander("Final Localized Content", expanded=True):
+            st.markdown(state.get("draft_content", ""))
+    if st.button("↻ Start New", key="btn_rst"):
+        st.session_state.stage = "idle"
+        st.session_state.pipeline_state = None
+        st.session_state.thread_id = None
+        st.rerun()
+
+# ---------------------------------------------------------------------------
+# Shared
+# ---------------------------------------------------------------------------
+def _render_diff(old, new):
+    if not old or not new or old == new: return
+    diff = list(difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=1))
+    if not diff: return
+    html = '<div style="font-family:monospace;font-size:11px;max-height:180px;overflow-y:auto;background:#0d1117;border:1px solid #21262d;border-radius:4px;padding:6px;">'
+    for line in diff[2:]:
+        if line.startswith("+"): html += f'<div class="diff-add">{line}</div>'
+        elif line.startswith("-"): html += f'<div class="diff-del">{line}</div>'
+    html += '</div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+def render_idle():
+    mode = st.session_state.app_mode
+    if mode == "Campaign Strategy":
+        st.markdown("""<div class="agent-card" style="padding:1.5rem;">
+<p style="color:#e6edf3;font-size:13px;font-weight:600;margin-bottom:8px;">How it works</p>
+<p style="color:#8b949e;margin-bottom:6px;">1. <b>📚 Campaign Historian</b> — Queries your past campaign archive & brand KB to find what worked and what failed</p>
+<p style="color:#8b949e;margin-bottom:6px;">2. <b>🌐 Market Intelligence</b> — Searches live web data to validate historical patterns against current trends</p>
+<p style="color:#8b949e;margin-bottom:6px;">3. <b>🏗️ Campaign Architect</b> — Synthesizes both inputs into a complete strategy with budget, flow, and messaging</p>
+<p style="color:#8b949e;margin-bottom:6px;">4. <b>↻ Feedback Router</b> — You review and provide feedback; an LLM routes it to the right agent for revision</p>
+<p style="color:#58a6ff;margin-top:12px;font-size:12px;">Enter your campaign brief in the sidebar → Launch Strategy Engine</p>
+</div>""", unsafe_allow_html=True)
+    else:
+        st.markdown("""<div class="agent-card" style="padding:1.5rem;">
+<p style="color:#e6edf3;font-size:13px;font-weight:600;margin-bottom:8px;">How it works</p>
+<p style="color:#8b949e;margin-bottom:6px;">1. <b>🔬 Cultural Researcher</b> — Searches the web for local slang, taboos, purchasing psychology, and marketing norms</p>
+<p style="color:#8b949e;margin-bottom:6px;">2. <b>✍️ Content Drafter</b> — Transcreates (not translates) your copy to resonate with the local audience</p>
+<p style="color:#8b949e;margin-bottom:6px;">3. <b>🎭 Cultural Critic</b> — A strict native reviewer scores the draft on authenticity, resonance, and idiom usage</p>
+<p style="color:#8b949e;margin-bottom:6px;">4. <b>⤺ Auto-Loop</b> — If score &lt; 7/10, the drafter revises automatically (up to 3 loops)</p>
+<p style="color:#58a6ff;margin-top:12px;font-size:12px;">Paste your English marketing copy in the sidebar → Launch Transcreator</p>
+</div>""", unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main():
+    brief = render_sidebar()
+
+    mode = st.session_state.app_mode
+    title = "Campaign Strategy Engine" if mode == "Campaign Strategy" else "Content Transcreator"
+    st.markdown(f"# Xpanse.ai — {title}")
+
+    stage = st.session_state.stage
+    state = st.session_state.pipeline_state or {}
+
+    if stage in ("idle", "running"):
+        render_idle()
+
+    if brief:
+        mode_key, params = brief
+        with st.spinner("Running agent pipeline..."):
+            try:
+                if mode_key == "campaign":
+                    _run_campaign(params)
+                else:
+                    _run_transcreator(**params)
+            except Exception as e:
+                st.error(f"Pipeline error: {e}")
+                st.session_state.stage = "idle"
+        st.rerun()
+
+    if stage == "review":
+        if mode == "Campaign Strategy":
+            render_campaign_review(state)
+        else:
+            render_transcreator_review(state)
+    elif stage == "approved":
+        render_approved(state)
 
 if __name__ == "__main__":
     main()

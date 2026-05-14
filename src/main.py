@@ -1,17 +1,12 @@
-"""Xpanse Agents — Main Orchestrator Entry Point.
+"""Xpanse.ai — Phase 3 Main Orchestrator with Feedback Router.
 
-Execution model
----------------
-Stage 1 (Blueprint):
-    compliance ──┐
-                 ├──► human_review  ──► [INTERRUPT]
-    strategy   ──┘
+Three-Agent + Router Pipeline:
+    1. Performance Sentinel (KB RAG) → 2. Strategic Seer (Tavily) →
+    3. Campaign Architect (Strategy Synthesis) → [INTERRUPT] →
+    4. Feedback Router (LLM intent classification) → loops or END
 
-The graph pauses before the 'architect' node, waiting for a human to review
-the Expansion Blueprint and set is_approved=True (or provide feedback).
-
-Stage 2 (Implementation) — triggered by resume_with_approval():
-    architect ──► qa ──► END
+The graph pauses after 'campaign_architect' for human review.
+User provides feedback, and the router intelligently directs it.
 """
 
 import logging
@@ -19,11 +14,11 @@ import uuid
 
 from langgraph.checkpoint.memory import MemorySaver
 
-from src.graph.state import create_initial_state #from state.py
-from src.graph.workflow import build_graph #from workflow.py
+from src.graph.state import create_initial_state
+from src.graph.workflow import build_graph
 
 # ---------------------------------------------------------------------------
-# Logging python
+# Logging
 # ---------------------------------------------------------------------------
 
 logging.basicConfig(
@@ -37,165 +32,150 @@ logger = logging.getLogger(__name__)
 # Shared checkpointer and compiled graph
 # ---------------------------------------------------------------------------
 
-# MemorySaver keeps state in-process. For production, swap in SqliteSaver or
-# a Postgres-backed checkpointer to persist state across restarts.
 _checkpointer = MemorySaver()
 _app = build_graph(checkpointer=_checkpointer)
 
 
 # ---------------------------------------------------------------------------
-# Stage 1: Run the Blueprint phase
+# Run the pipeline (up to HITL interrupt after Campaign Architect)
 # ---------------------------------------------------------------------------
 
 
-def run_expansion(region: str, goal: str) -> str:
-    """Initialise and run Stage 1 of the Xpanse Agent pipeline.
+def run_strategy(
+    campaign_aim: str,
+    target_audience: str = "",
+    budget: float = 0.0,
+    duration: str = "",
+    constraints: str = "",
+    is_expansion: bool = False,
+    target_region: str | None = None,
+) -> str:
+    """Run the pipeline from Performance Sentinel through Campaign Architect.
 
-    Invokes the graph from START through the compliance + strategy nodes
-    (in parallel) and the human_review node, then pauses at the
-    interrupt_before=["architect"] gate.
+    The graph pauses after campaign_architect via interrupt_after,
+    waiting for human review and feedback.
 
     Args:
-        region: Target geographic region (e.g. 'Japan').
-        goal:   The campaign objective as a plain-English string.
+        campaign_aim: Primary campaign objective.
+        target_audience: Description of the target audience.
+        budget: Campaign budget in dollars.
+        duration: Campaign duration string.
+        constraints: Forbidden content or mandatory disclaimers.
+        is_expansion: Whether geographic expansion is enabled.
+        target_region: Target region (only used if is_expansion=True).
 
     Returns:
-        The thread_id for this run. Pass it to resume_with_approval() later.
+        The thread_id for this run (needed for resume/feedback).
     """
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
     initial_state = create_initial_state(
-        target_region=region,
-        campaign_goal=goal,
+        campaign_aim=campaign_aim,
+        target_audience=target_audience,
+        budget=budget,
+        duration=duration,
+        constraints=constraints,
+        is_expansion=is_expansion,
+        target_region=target_region,
     )
 
     logger.info("=" * 60)
-    logger.info("Starting Xpanse Agent pipeline")
-    logger.info("  Region : %s", region)
-    logger.info("  Goal   : %s", goal)
-    logger.info("  Thread : %s", thread_id)
+    logger.info("Starting Xpanse Phase 3 Pipeline")
+    logger.info("  Objective : %s", campaign_aim[:80])
+    logger.info("  Expansion : %s → %s", is_expansion, target_region or "N/A")
+    logger.info("  Thread    : %s", thread_id)
     logger.info("=" * 60)
 
-    # stream_mode="values" yields the full state after each node completes.
-    # The graph will stop automatically at interrupt_before=["architect"].
     final_state = None
     for state_snapshot in _app.stream(initial_state, config=config, stream_mode="values"):
         final_state = state_snapshot
 
-    # -----------------------------------------------------------------------
-    # Print the Expansion Blueprint (Stage 1 outputs)
-    # -----------------------------------------------------------------------
+    # Print results
     print("\n" + "=" * 60)
-    print("  EXPANSION BLUEPRINT — Stage 1 Complete")
+    print("  STRATEGY PIPELINE — Paused for Human Review")
     print("=" * 60)
 
-    compliance = (final_state or {}).get("compliance_output")
-    strategy = (final_state or {}).get("strategy_output")
-
-    if compliance:
-        print("\n── COMPLIANCE RISK REPORT ──────────────────────────────")
-        print(compliance)
-    else:
-        print("\n[Compliance output not yet available]")
-
-    if strategy:
-        print("\n── LOCALISED STRATEGY ──────────────────────────────────")
-        print(strategy)
-    else:
-        print("\n[Strategy output not yet available]")
+    if final_state:
+        strategy = final_state.get("strategy_document", "")
+        if strategy:
+            print("\n── CAMPAIGN STRATEGY (for review) ──────────────────────")
+            print(strategy[:800] + "..." if len(strategy) > 800 else strategy)
 
     print("\n" + "=" * 60)
-    print("  Graph paused before 'architect' node.")
-    print("  Review the blueprint above, then call:")
-    print(f"    resume_with_approval(thread_id='{thread_id}', approved=True)")
-    print("  Or provide feedback:")
-    print(f"    resume_with_approval(thread_id='{thread_id}', approved=False,")
-    print("                         feedback='<your notes here>')")
+    print(f"  Thread: {thread_id}")
+    print("  Call provide_feedback() or approve_strategy() to continue.")
     print("=" * 60 + "\n")
 
     return thread_id
 
 
 # ---------------------------------------------------------------------------
-# Stage 2: Resume after human review
+# Provide feedback (routed by the Feedback Router)
 # ---------------------------------------------------------------------------
 
 
-def resume_with_approval(
-    thread_id: str,
-    approved: bool,
-    feedback: str | None = None,
-) -> None:
-    """Resume the graph after human review of the Expansion Blueprint.
-
-    This function injects the human decision into the persisted state and
-    resumes execution from the interrupt point.
+def provide_feedback(thread_id: str, feedback: str) -> None:
+    """Provide feedback — the Feedback Router will determine which agent to re-run.
 
     Args:
-        thread_id: The thread ID returned by run_expansion().
-        approved:  True to proceed to the architect; False to loop back to
-                   the strategy node with optional feedback.
-        feedback:  Optional reviewer notes passed to the Cultural Strategist
-                   on the next strategy iteration (only used when approved=False).
-
-    Example — approve and proceed to Stage 2:
-        resume_with_approval(thread_id="abc-123", approved=True)
-
-    Example — reject with feedback:
-        resume_with_approval(
-            thread_id="abc-123",
-            approved=False,
-            feedback="Increase cashback percentage for Gen-Z segment.",
-        )
+        thread_id: The thread ID from run_strategy().
+        feedback: Human feedback text. The router analyzes this to decide routing.
     """
     config = {"configurable": {"thread_id": thread_id}}
 
-    # Build the state update to inject before resuming
-    state_update: dict = {"is_approved": approved}
-    if feedback:
-        state_update["human_feedback"] = feedback
+    state_update = {
+        "human_feedback": feedback,
+        "is_approved": False,
+    }
 
-    logger.info(
-        "Resuming thread %s — approved=%s feedback=%s",
-        thread_id,
-        approved,
-        repr(feedback),
-    )
+    logger.info("Providing feedback to thread %s: %s", thread_id, feedback[:60])
 
-    # Update the persisted state, then resume by invoking with None input
-    _app.update_state(config, state_update)
+    _app.update_state(config, state_update, as_node="campaign_architect")
 
     final_state = None
     for state_snapshot in _app.stream(None, config=config, stream_mode="values"):
         final_state = state_snapshot
 
-    if approved:
-        artifacts = (final_state or {}).get("technical_artifacts", {})
+    if final_state:
+        target = final_state.get("target_node", "unknown")
+        strategy = final_state.get("strategy_document", "")
+        print(f"\n── Router Decision: {target} ────────────────────────────")
+        if strategy:
+            print(strategy[:800] + "..." if len(strategy) > 800 else strategy)
         print("\n" + "=" * 60)
-        print("  TECHNICAL ARTIFACTS — Stage 2 Complete")
-        print("=" * 60)
+        print(f"  Thread: {thread_id}")
+        print("  Call provide_feedback() or approve_strategy() again.")
+        print("=" * 60 + "\n")
 
-        sql = artifacts.get("sql")
-        python_code = artifacts.get("python")
-        qa_report = artifacts.get("qa_report")
 
-        if sql:
-            print("\n── SNOWFLAKE SQL ────────────────────────────────────────")
-            print(sql)
-        if python_code:
-            print("\n── AWS LAMBDA PYTHON ────────────────────────────────────")
-            print(python_code)
-        if qa_report:
-            print("\n── QA REPORT ────────────────────────────────────────────")
-            print(qa_report)
+# ---------------------------------------------------------------------------
+# Approve the strategy
+# ---------------------------------------------------------------------------
 
-        print("\n" + "=" * 60 + "\n")
-    else:
-        logger.info(
-            "Strategy loop triggered. Call run_expansion() output or "
-            "resume_with_approval() again after reviewing the updated blueprint."
-        )
+
+def approve_strategy(thread_id: str) -> None:
+    """Approve the strategy — routes to END via the Feedback Router.
+
+    Args:
+        thread_id: The thread ID from run_strategy().
+    """
+    config = {"configurable": {"thread_id": thread_id}}
+
+    state_update = {
+        "human_feedback": "approve",
+        "is_approved": True,
+        "target_node": "end",
+    }
+
+    _app.update_state(config, state_update, as_node="campaign_architect")
+
+    final_state = None
+    for state_snapshot in _app.stream(None, config=config, stream_mode="values"):
+        final_state = state_snapshot
+
+    logger.info("Strategy APPROVED for thread %s", thread_id)
+    print("\n✅ Strategy approved. Campaign strategy is finalized.\n")
 
 
 # ---------------------------------------------------------------------------
@@ -203,22 +183,17 @@ def resume_with_approval(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Test run: Japan / Sneaker Rewards expansion
-    thread = run_expansion(
-        region="Japan",
-        goal="Expand Sneaker Rewards Program",
+    thread = run_strategy(
+        campaign_aim="Expand Sneaker Rewards Program to increase Gen-Z enrollment by 15%",
+        target_audience="Gen-Z consumers aged 18-25 interested in streetwear and sneaker culture",
+        budget=50000.0,
+        duration="14 Days",
+        constraints="No misleading claims about reward values. Must include unsubscribe option.",
+        is_expansion=True,
+        target_region="Japan",
     )
 
-    # -----------------------------------------------------------------------
-    # To continue to Stage 2, uncomment and run:
-    #
-    resume_with_approval(thread_id=thread, approved=True)
-    #
-    # Or to loop back with feedback:
-    #
-    # resume_with_approval(
-    #     thread_id=thread,
-    #     approved=False,
-    #     feedback="Increase point multiplier for limited-edition drops.",
-    # )
-    # -----------------------------------------------------------------------
+    # Interactive loop:
+    # provide_feedback(thread, "I need more data on past campaign metrics")
+    # provide_feedback(thread, "Research competitor trends in Japan market")
+    # approve_strategy(thread)
